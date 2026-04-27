@@ -6,16 +6,20 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+
     services:
       postgres:
-        image: postgres:latest
+        image: postgres:16
         env:
           POSTGRES_USER: user
           POSTGRES_PASSWORD: password
-          POSTGRES_DB: mytestdb  # <-- Dedicated test DB name
+          POSTGRES_DB: mytestdb
         ports:
           - 5432:5432
         options: >-
@@ -23,20 +27,24 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+
     steps:
-      - uses: actions/checkout@v3
-      
-      - uses: actions/setup-python@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          
-      - uses: actions/cache@v3
+
+      - name: Cache pip
+        uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-
-      
+
       - name: Install dependencies
         env:
           DATABASE_URL: postgresql://user:password@localhost:5432/mytestdb
@@ -45,62 +53,92 @@ jobs:
           source venv/bin/activate
           pip install --upgrade pip
           pip install -r requirements.txt
-          playwright install  # if you use Playwright for e2e tests
-      
-      - name: Run tests
+          python -m playwright install --with-deps
+          mkdir -p test-results
+
+      - name: Run unit tests
         env:
           DATABASE_URL: postgresql://user:password@localhost:5432/mytestdb
         run: |
           source venv/bin/activate
-          
-          # 1) Unit tests
-          pytest tests/unit/ --cov=src --junitxml=test-results/junit.xml
-          
-          # 2) Integration tests
+          pytest tests/unit/ --cov=app --cov-report=term-missing --junitxml=test-results/junit.xml
+
+      - name: Run integration tests
+        env:
+          DATABASE_URL: postgresql://user:password@localhost:5432/mytestdb
+        run: |
+          source venv/bin/activate
           pytest tests/integration/
-          
-          # 3) E2E or other tests
+
+      - name: Start app for E2E tests
+        env:
+          DATABASE_URL: postgresql://user:password@localhost:5432/mytestdb
+        run: |
+          source venv/bin/activate
+          uvicorn app.main:app --host 127.0.0.1 --port 8000 &
+          sleep 10
+          curl --fail http://127.0.0.1:8000/health
+
+      - name: Run E2E tests
+        env:
+          DATABASE_URL: postgresql://user:password@localhost:5432/mytestdb
+        run: |
+          source venv/bin/activate
           pytest tests/e2e/
+
+      - name: Upload test artifacts
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results/
 
   security:
     needs: test
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      
+      - name: Check out repository
+        uses: actions/checkout@v4
+
       - name: Build image
         run: docker build -t app:test .
-      
+
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.28.0
         with:
-          image-ref: 'app:test'
-          format: 'table'
+          image-ref: app:test
+          format: table
           exit-code: '1'
           ignore-unfixed: true
-          severity: 'CRITICAL,HIGH'
-  
+          severity: CRITICAL,HIGH
+
   deploy:
     needs: security
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: production
+
     steps:
-      - uses: actions/checkout@v4
-      
-      - uses: docker/setup-buildx-action@v3
-      
-      - uses: docker/login-action@v3
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-          
-      - uses: docker/build-push-action@v5
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
         with:
           push: true
           tags: |
-            kaw393939/601_module9:latest
-            kaw393939/601_module9:${{ github.sha }}
+            danielleev33/module14_is601:latest
+            danielleev33/module14_is601:${{ github.sha }}
           platforms: linux/amd64,linux/arm64
-          cache-from: type=registry,ref=kaw393939/601_module9:cache
-          cache-to: type=inline,mode=max
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
