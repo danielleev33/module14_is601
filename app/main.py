@@ -15,30 +15,31 @@ The application follows a RESTful API design with proper separation of concerns:
 - Dependencies handle authentication and database sessions
 """
 
-from contextlib import asynccontextmanager  # Used for startup/shutdown events
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
-from uuid import UUID  # For type validation of UUIDs in path parameters
+from uuid import UUID
 from typing import List
 
 # FastAPI imports
 from fastapi import Body, FastAPI, Depends, HTTPException, status, Request, Form
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles  # For serving static files (CSS, JS)
-from fastapi.templating import Jinja2Templates  # For HTML templates
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, EmailStr
 
-from sqlalchemy.orm import Session  # SQLAlchemy database session
+from sqlalchemy.orm import Session
 
-import uvicorn  # ASGI server for running FastAPI apps
+import uvicorn
 
 # Application imports
-from app.auth.dependencies import get_current_active_user  # Authentication dependency
-from app.models.calculation import Calculation  # Database model for calculations
-from app.models.user import User  # Database model for users
-from app.schemas.calculation import CalculationBase, CalculationResponse, CalculationUpdate  # API request/response schemas
-from app.schemas.token import TokenResponse  # API token schema
-from app.schemas.user import UserCreate, UserResponse, UserLogin  # User schemas
-from app.database import Base, get_db, engine  # Database connection
+from app.auth.jwt import get_current_user
+from app.models.calculation import Calculation
+from app.models.user import User
+from app.schemas.calculation import CalculationBase, CalculationResponse, CalculationUpdate
+from app.schemas.token import TokenResponse
+from app.schemas.user import UserCreate, UserResponse, UserLogin
+from app.database import Base, get_db, engine
 
 
 # ------------------------------------------------------------------------------
@@ -48,118 +49,125 @@ from app.database import Base, get_db, engine  # Database connection
 async def lifespan(app: FastAPI):
     """
     Lifespan context manager for FastAPI.
-    
+
     This runs when the application starts and creates all database tables
     defined in SQLAlchemy models. It's an alternative to using Alembic
     for simpler applications.
-    
+
     Args:
         app: FastAPI application instance
     """
     print("Creating tables...")
     Base.metadata.create_all(bind=engine)
     print("Tables created successfully!")
-    yield  # This is where application runs
-    # Cleanup code would go here (after yield), but we don't need any
+    yield
+
 
 # Initialize the FastAPI application with metadata and lifespan
 app = FastAPI(
     title="Calculations API",
     description="API for managing calculations",
     version="1.0.0",
-    lifespan=lifespan  # Pass our lifespan context manager
+    lifespan=lifespan
 )
 
 # ------------------------------------------------------------------------------
 # Static Files and Templates Configuration
 # ------------------------------------------------------------------------------
-# Mount the static files directory for serving CSS, JS, and images
 app.mount("/static", StaticFiles(directory="static"), name="static")
-
-# Set up Jinja2 templates directory for HTML rendering
 templates = Jinja2Templates(directory="templates")
+
+
+# ------------------------------------------------------------------------------
+# Profile API Schemas
+# ------------------------------------------------------------------------------
+class ProfileResponse(BaseModel):
+    id: UUID
+    username: str
+    email: EmailStr
+    first_name: str
+    last_name: str
+    is_active: bool
+    is_verified: bool
+
+    class Config:
+        from_attributes = True
+
+
+class ProfileUpdate(BaseModel):
+    first_name: str
+    last_name: str
+    email: EmailStr
 
 
 # ------------------------------------------------------------------------------
 # Web (HTML) Routes
 # ------------------------------------------------------------------------------
-# Our web routes use HTML responses with Jinja2 templates
-# These provide a user-friendly web interface alongside the API
-
 @app.get("/", response_class=HTMLResponse, tags=["web"])
 def read_index(request: Request):
     """
     Landing page.
-    
+
     Displays the welcome page with links to register and login.
     """
     return templates.TemplateResponse("index.html", {"request": request})
+
 
 @app.get("/login", response_class=HTMLResponse, tags=["web"])
 def login_page(request: Request):
     """
     Login page.
-    
+
     Displays a form for users to enter credentials and log in.
     """
     return templates.TemplateResponse("login.html", {"request": request})
+
 
 @app.get("/register", response_class=HTMLResponse, tags=["web"])
 def register_page(request: Request):
     """
     Registration page.
-    
+
     Displays a form for new users to create an account.
     """
     return templates.TemplateResponse("register.html", {"request": request})
+
 
 @app.get("/dashboard", response_class=HTMLResponse, tags=["web"])
 def dashboard_page(request: Request):
     """
     Dashboard page, listing calculations & new calculation form.
-    
+
     This is the main interface after login, where users can:
     - See all their calculations
     - Create a new calculation
     - Access links to view/edit/delete calculations
-    
+
     JavaScript in this page calls the API endpoints to fetch and display data.
     """
     return templates.TemplateResponse("dashboard.html", {"request": request})
+
 
 @app.get("/dashboard/view/{calc_id}", response_class=HTMLResponse, tags=["web"])
 def view_calculation_page(request: Request, calc_id: str):
     """
     Page for viewing a single calculation (Read).
-    
-    Part of the BREAD (Browse, Read, Edit, Add, Delete) pattern:
-    - This is the Read page
-    
-    Args:
-        request: The FastAPI request object (required by Jinja2)
-        calc_id: UUID of the calculation to view
-        
-    Returns:
-        HTMLResponse: Rendered template with calculation ID passed to frontend
     """
-    return templates.TemplateResponse("view_calculation.html", {"request": request, "calc_id": calc_id})
+    return templates.TemplateResponse(
+        "view_calculation.html",
+        {"request": request, "calc_id": calc_id}
+    )
+
 
 @app.get("/dashboard/edit/{calc_id}", response_class=HTMLResponse, tags=["web"])
 def edit_calculation_page(request: Request, calc_id: str):
     """
     Page for editing a calculation (Update).
-    
-    Part of the BREAD (Browse, Read, Edit, Add, Delete) pattern:
-    - This is the Edit page
-    
-    Args:
-        request: The FastAPI request object (required by Jinja2)
-        calc_id: UUID of the calculation to edit
-        
-    Returns:
-        HTMLResponse: Rendered template with calculation ID passed to frontend
     """
-    return templates.TemplateResponse("edit_calculation.html", {"request": request, "calc_id": calc_id})
+    return templates.TemplateResponse(
+        "edit_calculation.html",
+        {"request": request, "calc_id": calc_id}
+    )
 
 
 # ------------------------------------------------------------------------------
@@ -175,8 +183,8 @@ def read_health():
 # User Registration Endpoint
 # ------------------------------------------------------------------------------
 @app.post(
-    "/auth/register", 
-    response_model=UserResponse, 
+    "/auth/register",
+    response_model=UserResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["auth"]
 )
@@ -192,7 +200,10 @@ def register(user_create: UserCreate, db: Session = Depends(get_db)):
         return user
     except ValueError as e:
         db.rollback()
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
 
 
 # ------------------------------------------------------------------------------
@@ -213,9 +224,8 @@ def login_json(user_login: UserLogin, db: Session = Depends(get_db)):
         )
 
     user = auth_result["user"]
-    db.commit()  # commit the last_login update
+    db.commit()
 
-    # Ensure expires_at is timezone-aware
     expires_at = auth_result.get("expires_at")
     if expires_at and expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
@@ -236,8 +246,12 @@ def login_json(user_login: UserLogin, db: Session = Depends(get_db)):
         is_verified=user.is_verified
     )
 
+
 @app.post("/auth/token", tags=["auth"])
-def login_form(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+def login_form(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db)
+):
     """
     Login with form data (Swagger/UI).
     Returns an access token.
@@ -257,9 +271,58 @@ def login_form(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = D
 
 
 # ------------------------------------------------------------------------------
+# User Profile Endpoints
+# ------------------------------------------------------------------------------
+@app.get("/users/me", response_model=ProfileResponse, tags=["users"])
+async def get_my_profile(current_user: User = Depends(get_current_user)):
+    """
+    Get the current authenticated user's profile.
+    """
+    return current_user
+
+
+@app.put("/users/me", response_model=ProfileResponse, tags=["users"])
+async def update_my_profile(
+    profile_data: ProfileUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Update the current authenticated user's profile.
+    """
+    first_name = profile_data.first_name.strip()
+    last_name = profile_data.last_name.strip()
+    email = profile_data.email.strip().lower()
+
+    if not first_name or not last_name or not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="First name, last name, and email are required."
+        )
+
+    existing_user = db.query(User).filter(
+        User.email == email,
+        User.id != current_user.id
+    ).first()
+
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email is already in use."
+        )
+
+    current_user.first_name = first_name
+    current_user.last_name = last_name
+    current_user.email = email
+
+    db.commit()
+    db.refresh(current_user)
+    return current_user
+
+
+# ------------------------------------------------------------------------------
 # Calculations Endpoints (BREAD)
 # ------------------------------------------------------------------------------
-# Create (Add) Calculation
 @app.post(
     "/calculations",
     response_model=CalculationResponse,
@@ -268,12 +331,12 @@ def login_form(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = D
 )
 def create_calculation(
     calculation_data: CalculationBase,
-    current_user = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Create a new calculation for the authenticated user.
-    Automatically computes the 'result'.
+    Automatically computes the result.
     """
     try:
         new_calculation = Calculation.create(
@@ -296,24 +359,24 @@ def create_calculation(
         )
 
 
-# Browse / List Calculations
 @app.get("/calculations", response_model=List[CalculationResponse], tags=["calculations"])
 def list_calculations(
-    current_user = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     List all calculations belonging to the current authenticated user.
     """
-    calculations = db.query(Calculation).filter(Calculation.user_id == current_user.id).all()
+    calculations = db.query(Calculation).filter(
+        Calculation.user_id == current_user.id
+    ).all()
     return calculations
 
 
-# Read / Retrieve a Specific Calculation by ID
 @app.get("/calculations/{calc_id}", response_model=CalculationResponse, tags=["calculations"])
 def get_calculation(
     calc_id: str,
-    current_user = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -322,24 +385,30 @@ def get_calculation(
     try:
         calc_uuid = UUID(calc_id)
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid calculation id format.")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid calculation id format."
+        )
 
     calculation = db.query(Calculation).filter(
         Calculation.id == calc_uuid,
         Calculation.user_id == current_user.id
     ).first()
+
     if not calculation:
-        raise HTTPException(status_code=404, detail="Calculation not found.")
+        raise HTTPException(
+            status_code=404,
+            detail="Calculation not found."
+        )
 
     return calculation
 
 
-# Edit / Update a Calculation
 @app.put("/calculations/{calc_id}", response_model=CalculationResponse, tags=["calculations"])
 def update_calculation(
     calc_id: str,
     calculation_update: CalculationUpdate,
-    current_user = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -348,14 +417,21 @@ def update_calculation(
     try:
         calc_uuid = UUID(calc_id)
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid calculation id format.")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid calculation id format."
+        )
 
     calculation = db.query(Calculation).filter(
         Calculation.id == calc_uuid,
         Calculation.user_id == current_user.id
     ).first()
+
     if not calculation:
-        raise HTTPException(status_code=404, detail="Calculation not found.")
+        raise HTTPException(
+            status_code=404,
+            detail="Calculation not found."
+        )
 
     if calculation_update.inputs is not None:
         calculation.inputs = calculation_update.inputs
@@ -367,11 +443,10 @@ def update_calculation(
     return calculation
 
 
-# Delete a Calculation
 @app.delete("/calculations/{calc_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["calculations"])
 def delete_calculation(
     calc_id: str,
-    current_user = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -380,14 +455,21 @@ def delete_calculation(
     try:
         calc_uuid = UUID(calc_id)
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid calculation id format.")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid calculation id format."
+        )
 
     calculation = db.query(Calculation).filter(
         Calculation.id == calc_uuid,
         Calculation.user_id == current_user.id
     ).first()
+
     if not calculation:
-        raise HTTPException(status_code=404, detail="Calculation not found.")
+        raise HTTPException(
+            status_code=404,
+            detail="Calculation not found."
+        )
 
     db.delete(calculation)
     db.commit()
@@ -398,5 +480,4 @@ def delete_calculation(
 # Main Block to Run the Server
 # ------------------------------------------------------------------------------
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run("app.main:app", host="127.0.0.1", port=8001, log_level="info")

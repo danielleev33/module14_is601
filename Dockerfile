@@ -6,10 +6,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install system dependencies
 RUN apt-get update && \
-    apt-get upgrade -y && \
-    apt-get install -y --no-install-recommends gcc python3-dev libssl-dev curl && \
+    apt-get install -y --no-install-recommends curl gcc libssl-dev && \
     rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip and essential Python tools

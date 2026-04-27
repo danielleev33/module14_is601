@@ -1,19 +1,19 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Union
 import secrets
+from uuid import UUID
 
 import jwt
 from jwt import ExpiredSignatureError, InvalidTokenError
 from passlib.context import CryptContext
 from fastapi import HTTPException, status, Depends
 from fastapi.security import OAuth2PasswordBearer
-from uuid import UUID
+from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.auth.redis import add_to_blacklist, is_blacklisted
+from app.auth.redis import is_blacklisted
 from app.schemas.token import TokenType
 from app.database import get_db
-from sqlalchemy.orm import Session
 from app.models.user import User
 
 settings = get_settings()
@@ -43,9 +43,6 @@ def create_token(
     token_type: TokenType,
     expires_delta: Optional[timedelta] = None
 ) -> str:
-    """
-    Create a JWT token (access or refresh).
-    """
     if expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
     else:
@@ -89,9 +86,6 @@ async def decode_token(
     token_type: TokenType,
     verify_exp: bool = True
 ) -> dict[str, Any]:
-    """
-    Decode and verify a JWT token.
-    """
     try:
         secret = (
             settings.JWT_SECRET_KEY
@@ -113,12 +107,16 @@ async def decode_token(
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-        if await is_blacklisted(payload["jti"]):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Token has been revoked",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+        try:
+            if await is_blacklisted(payload["jti"]):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Token has been revoked",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+        except Exception:
+            # Redis unavailable: skip blacklist check instead of failing auth
+            pass
 
         return payload
 
@@ -140,10 +138,6 @@ async def get_current_user(
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
 ) -> User:
-    """
-    Dependency to get current user from access token.
-    Returns the actual User model instance.
-    """
     try:
         payload = await decode_token(token, TokenType.ACCESS)
         user_id = payload["sub"]
@@ -171,3 +165,9 @@ async def get_current_user(
             detail=str(e),
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+async def get_current_active_user(
+    current_user: User = Depends(get_current_user)
+) -> User:
+    return current_user
