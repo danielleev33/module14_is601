@@ -279,7 +279,8 @@ class User(Base):
             UUID: User ID if token is valid, None otherwise
         """
         from app.core.config import settings
-        from jose import jwt, JWTError
+        import jwt
+        from jwt import InvalidTokenError
         try:
             payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.ALGORITHM])
             sub = payload.get("sub")
@@ -289,5 +290,5 @@ class User(Base):
                 return uuid.UUID(sub)
             except (ValueError, TypeError):
                 return None
-        except JWTError:
+        except InvalidTokenError:
             return None
